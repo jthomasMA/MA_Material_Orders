@@ -1,16 +1,18 @@
 // M-A Building Field Orders — single-page app (no build step needed)
 import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/+esm';
-
+ 
 const CFG = window.APP_CONFIG || {};
 const $app = document.getElementById('app');
 const $tabbar = document.getElementById('tabbar');
 const $user = document.getElementById('topbar-user');
 document.getElementById('brand-name').textContent = CFG.APP_NAME || 'Field Orders';
 document.title = `${CFG.APP_NAME || 'Field Orders'} · ${CFG.COMPANY_NAME || ''}`;
-
+ 
+// Supabase function that sends push notifications (the name at the end of its URL)
+const NOTIFY_FN = CFG.NOTIFY_FUNCTION || 'hyper-responder';
 const STATUSES = ['Pending', 'Approved', 'Ordered', 'Delivered', 'Rejected', 'Cancelled'];
 const OPEN = ['Pending', 'Approved', 'Ordered'];
-
+ 
 // ---------------------------------------------------------------- helpers
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const orderNo = (id) => 'MR-' + String(id).padStart(5, '0');
@@ -25,7 +27,7 @@ const jobLabel = (j) => (j ? [j.job_number, j.name].filter(Boolean).join(' — '
 const badge = (s) => `<span class="badge ${esc(s)}">${esc(s)}</span>`;
 const $ = (sel, root = $app) => root.querySelector(sel);
 const $$ = (sel, root = $app) => [...root.querySelectorAll(sel)];
-
+ 
 let toastTimer;
 function toast(msg, isErr = false) {
   const t = document.getElementById('toast');
@@ -35,33 +37,33 @@ function toast(msg, isErr = false) {
   toastTimer = setTimeout(() => t.classList.add('hidden'), isErr ? 6000 : 3200);
 }
 const errMsg = (e) => (e && (e.message || e.error_description)) || String(e);
-
+ 
 // ---------------------------------------------------------------- not configured yet
 if (!CFG.SUPABASE_URL || CFG.SUPABASE_URL.includes('YOUR-PROJECT')) {
   $app.innerHTML = `<div class="card login"><h1>Almost there</h1>
     <p>Open <b>config.js</b> and paste in your Supabase project URL and anon key. See <b>README.md</b>, step 2.</p></div>`;
   throw new Error('APP_CONFIG not set');
 }
-
+ 
 const sb = createClient(CFG.SUPABASE_URL, CFG.SUPABASE_ANON_KEY);
 const state = { session: null, profile: null, jobsites: [], catalog: [], recovery: false, channel: null };
 const isAdmin = () => state.profile?.role === 'admin';
 const uid = () => state.session?.user?.id;
-
+ 
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
-
+ 
 // ---------------------------------------------------------------- order draft (survives refresh)
 const DRAFT_KEY = 'fo-draft-v1';
 const blankDraft = () => ({ jobsite_id: '', needed_by: '', priority: 'Normal', delivery_method: 'Deliver to site', delivery_notes: '', items: [] });
 let draft = (() => { try { return JSON.parse(localStorage.getItem(DRAFT_KEY)) || blankDraft(); } catch { return blankDraft(); } })();
 const saveDraft = () => { try { localStorage.setItem(DRAFT_KEY, JSON.stringify(draft)); } catch {} };
-
+ 
 // ---------------------------------------------------------------- push notifications
 const pushSupported = () => 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
 const isIOS = /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 const isStandalone = () => window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
 const vapidReady = () => CFG.VAPID_PUBLIC_KEY && !CFG.VAPID_PUBLIC_KEY.startsWith('YOUR-');
-
+ 
 function b64ToUint8(base64) {
   const pad = '='.repeat((4 - (base64.length % 4)) % 4);
   const raw = atob((base64 + pad).replace(/-/g, '+').replace(/_/g, '/'));
@@ -114,8 +116,8 @@ async function fnErrorText(error) {
   if (error?.name === 'FunctionsFetchError') return 'Couldn’t reach the “notify” function. It may not be deployed, or it crashed on startup. Check Supabase → Edge Functions → notify → Logs.';
   return error?.message || String(error);
 }
-const notify = (type, order_id) => sb.functions.invoke('notify', { body: { type, order_id } }).catch(() => {});
-
+const notify = (type, order_id) => sb.functions.invoke(NOTIFY_FN, { body: { type, order_id } }).catch(() => {});
+ 
 // ---------------------------------------------------------------- data
 async function loadBasics() {
   const [p, j, c] = await Promise.all([
@@ -128,7 +130,7 @@ async function loadBasics() {
   state.catalog = c.data || [];
 }
 const ORDER_SELECT = '*, jobsite:jobsites(id, name, job_number, address), requester:profiles(full_name, email, phone), order_items(*)';
-
+ 
 // ---------------------------------------------------------------- router
 const ICONS = {
   new: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/></svg>',
@@ -144,13 +146,13 @@ function renderTabbar(active) {
   $tabbar.innerHTML = tabs.map(([k, href, label]) => `<a href="${href}" class="${active === k ? 'on' : ''}">${ICONS[k]}<span>${label}</span></a>`).join('');
   $tabbar.classList.remove('hidden');
 }
-
+ 
 async function route() {
   if (state.channel) { sb.removeChannel(state.channel); state.channel = null; }
   $app.classList.remove('wide');
   const parts = (location.hash.replace(/^#\/?/, '') || 'new').split('/');
   $user.textContent = state.profile ? (state.profile.full_name || state.profile.email || '') : '';
-
+ 
   if (state.recovery) { renderTabbar(); return viewSetPassword(); }
   if (!state.session) { renderTabbar(); return viewLogin(); }
   if (!state.profile) {
@@ -172,7 +174,7 @@ async function route() {
   }
 }
 window.addEventListener('hashchange', route);
-
+ 
 // ---------------------------------------------------------------- auth views
 function viewLogin() {
   $app.innerHTML = `
@@ -203,7 +205,7 @@ function viewLogin() {
     if (error) toast(error.message, true); else toast('Check your email for a reset link.');
   };
 }
-
+ 
 function viewSetPassword() {
   $app.innerHTML = `
   <div class="login"><form class="card" id="f"><h1>Set a new password</h1>
@@ -223,12 +225,12 @@ function viewSetPassword() {
     route();
   };
 }
-
+ 
 function pushBanner() {
   if (!isAdmin() || !pushSupported() || !vapidReady() || Notification.permission !== 'default') return '';
   return `<div class="banner">🔔 Get a notification on this device when a new order comes in. <a href="#/settings">Turn on</a></div>`;
 }
-
+ 
 // ---------------------------------------------------------------- new order
 function viewNewOrder() {
   const jobOpts = state.jobsites.map((j) => `<option value="${j.id}" ${String(j.id) === String(draft.jobsite_id) ? 'selected' : ''}>${esc(jobLabel(j))}</option>`).join('');
@@ -250,7 +252,7 @@ function viewNewOrder() {
       <div class="field"><label for="dn">Delivery notes <span class="sub">(gate code, where to drop, contact)</span></label>
         <textarea id="dn">${esc(draft.delivery_notes)}</textarea></div>
     </div>
-
+ 
     <div class="card">
       <h2>Add items</h2>
       <div class="chips" id="cats">
@@ -268,7 +270,7 @@ function viewNewOrder() {
         <button type="button" class="btn" id="cAdd">Add to order</button>
       </div>
     </div>
-
+ 
     <div class="card">
       <div class="row spread"><h2 style="margin:0">Order list</h2><span class="sub" id="count"></span></div>
       <div id="cart" style="margin-top:12px"></div>
@@ -276,7 +278,7 @@ function viewNewOrder() {
     <div class="error hidden" id="er" style="margin-bottom:10px"></div>
     <button class="btn block" id="submit">Submit order</button>
     <div style="text-align:center;margin-top:8px"><button class="linkbtn" id="clear">Clear form</button></div>`;
-
+ 
   let cat = 'All';
   const renderResults = () => {
     const q = $('#q').value.trim().toLowerCase();
@@ -307,9 +309,9 @@ function viewNewOrder() {
     saveDraft(); renderCart();
     toast(`Added: ${it.item_name}`);
   };
-
+ 
   renderResults(); renderCart();
-
+ 
   $('#job').onchange = (e) => { draft.jobsite_id = e.target.value; saveDraft(); };
   $('#need').onchange = (e) => { draft.needed_by = e.target.value; saveDraft(); };
   $('#dn').oninput = (e) => { draft.delivery_notes = e.target.value; saveDraft(); };
@@ -353,7 +355,7 @@ function viewNewOrder() {
     saveDraft();
   };
   $('#clear').onclick = () => { if (confirm('Clear this order form?')) { draft = blankDraft(); saveDraft(); viewNewOrder(); } };
-
+ 
   $('#submit').onclick = async () => {
     const er = $('#er'); er.classList.add('hidden');
     const fail = (m) => { er.textContent = m; er.classList.remove('hidden'); };
@@ -378,7 +380,7 @@ function viewNewOrder() {
     location.hash = `#/order/${id}`;
   };
 }
-
+ 
 // ---------------------------------------------------------------- order lists
 function orderCard(o, showRequester) {
   const n = o.order_items?.length || 0;
@@ -388,7 +390,7 @@ function orderCard(o, showRequester) {
     <div class="meta">${n} item${n === 1 ? '' : 's'} · needed ${fmtDate(o.needed_by)}${showRequester ? ` · ${esc(o.requester?.full_name || o.requester?.email || '')}` : ''} · ${fmtDateTime(o.created_at)}</div>
   </a>`;
 }
-
+ 
 async function viewMyOrders() {
   $app.innerHTML = `<h1>My orders</h1><div class="loading">Loading…</div>`;
   const { data, error } = await sb.from('orders').select(ORDER_SELECT).eq('requested_by', uid()).order('created_at', { ascending: false }).limit(200);
@@ -404,7 +406,7 @@ async function viewMyOrders() {
   $('#f').onclick = (e) => { const b = e.target.closest('.chip'); if (!b) return; filter = b.dataset.f; $$('#f .chip').forEach((x) => x.classList.toggle('on', x === b)); draw(); };
   draw();
 }
-
+ 
 // ---------------------------------------------------------------- order detail
 async function viewOrder(id) {
   $app.innerHTML = `<div class="loading">Loading…</div>`;
@@ -412,7 +414,7 @@ async function viewOrder(id) {
   if (error || !o) throw new Error('Order not found');
   const mine = o.requested_by === uid();
   const items = (o.order_items || []).sort((a, b) => a.id - b.id);
-
+ 
   $app.innerHTML = `
     <div class="row spread no-print" style="margin-bottom:8px">
       <a href="${isAdmin() ? '#/admin' : '#/orders'}" class="linkbtn">← Back</a>
@@ -444,7 +446,7 @@ async function viewOrder(id) {
       <div class="row"><button class="btn" id="save">Save</button><button class="btn danger" id="del">Delete order</button></div>
     </div>` : ''}
     ${mine && o.status === 'Pending' && !isAdmin() ? `<button class="btn danger block no-print" id="cancel">Cancel this order</button>` : ''}`;
-
+ 
   $('#print').onclick = () => window.print();
   $('#reorder').onclick = () => {
     draft = { ...blankDraft(), jobsite_id: o.jobsite_id, delivery_method: o.delivery_method, delivery_notes: o.delivery_notes || '',
@@ -476,7 +478,7 @@ async function viewOrder(id) {
     };
   }
 }
-
+ 
 // ---------------------------------------------------------------- admin
 async function viewAdmin(tab) {
   $app.classList.add('wide');
@@ -488,7 +490,7 @@ async function viewAdmin(tab) {
   if (tab === 'users') return adminUsers(pane);
   return adminOrders(pane);
 }
-
+ 
 async function adminOrders(pane) {
   let filter = 'Open', job = '', q = '', data = [];
   const load = async () => {
@@ -532,7 +534,7 @@ async function adminOrders(pane) {
   $('#q', pane).oninput = (e) => { q = e.target.value.trim().toLowerCase(); draw(); };
   $('#csv', pane).onclick = () => exportCsv(filtered());
   draw();
-
+ 
   // live updates while the dashboard is open
   state.channel = sb.channel('orders-dash')
     .on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, async (payload) => {
@@ -542,7 +544,7 @@ async function adminOrders(pane) {
     })
     .subscribe();
 }
-
+ 
 function exportCsv(orders) {
   const head = ['Order #', 'Submitted', 'Status', 'Priority', 'Job #', 'Jobsite', 'Requested by', 'Needed by', 'Delivery', 'Delivery notes', 'Item', 'Type', 'Qty', 'Unit', 'Item notes', 'Office notes'];
   const rows = [head];
@@ -557,7 +559,7 @@ function exportCsv(orders) {
   a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 2000);
 }
-
+ 
 // Generic add / edit / hide list for catalog + jobsites
 async function adminList(pane, cfg) {
   const { table, title, fields, order, display, help } = cfg;
@@ -568,7 +570,7 @@ async function adminList(pane, cfg) {
     : `<input type="text" data-k="${f.key}" value="${esc(val ?? f.default ?? '')}" placeholder="${esc(f.label)}">`;
   const formRow = (rec = {}) => `<div class="grid2" style="grid-template-columns:repeat(auto-fit,minmax(150px,1fr))">${fields.map((f) => `<div><label>${esc(f.label)}</label>${input(f, rec[f.key])}</div>`).join('')}</div>`;
   const read = (root) => Object.fromEntries($$('[data-k]', root).map((el) => [el.dataset.k, el.value.trim() || null]));
-
+ 
   pane.innerHTML = `
     <h1>${esc(title)}</h1>
     <div class="card"><h2>Add new</h2><div id="add">${formRow()}</div><button class="btn" id="addBtn" style="margin-top:12px">Add</button>
@@ -578,7 +580,7 @@ async function adminList(pane, cfg) {
         <div class="grow view">${display(r)}</div>
         <button class="btn secondary small" data-act="edit">Edit</button>
         <button class="btn secondary small" data-act="toggle">${r.active ? 'Hide' : 'Show'}</button></div>`).join('')}</div>`;
-
+ 
   $('#addBtn', pane).onclick = async () => {
     const rec = read($('#add', pane));
     if (fields.some((f) => f.required && !rec[f.key])) return toast(`${fields.find((f) => f.required).label} is required`, true);
@@ -606,7 +608,7 @@ async function adminList(pane, cfg) {
     }
   };
 }
-
+ 
 const adminCatalog = (pane) => adminList(pane, {
   table: 'catalog_items', title: 'Materials & equipment catalog', order: ['category', 'name'],
   fields: [
@@ -618,7 +620,7 @@ const adminCatalog = (pane) => adminList(pane, {
   display: (r) => `<b>${esc(r.name)}</b><div class="meta">${esc(r.category)} · per ${esc(r.unit)}${r.description ? ' · ' + esc(r.description) : ''}${r.active ? '' : ' · hidden'}</div>`,
   help: '“Hide” removes an item from the order screen without affecting past orders.',
 });
-
+ 
 const adminJobsites = (pane) => adminList(pane, {
   table: 'jobsites', title: 'Jobsites', order: ['job_number', 'name'],
   fields: [
@@ -629,7 +631,7 @@ const adminJobsites = (pane) => adminList(pane, {
   display: (r) => `<b>${esc(jobLabel(r))}</b><div class="meta">${esc(r.address || 'No address')}${r.active ? '' : ' · hidden (closed job)'}</div>`,
   help: 'Hide a jobsite when the job closes so it no longer appears for field crews.',
 });
-
+ 
 async function adminUsers(pane) {
   const { data, error } = await sb.from('profiles').select('*').order('full_name');
   if (error) throw error;
@@ -653,7 +655,7 @@ async function adminUsers(pane) {
     };
   });
 }
-
+ 
 // ---------------------------------------------------------------- settings
 async function viewSettings() {
   const p = state.profile;
@@ -670,7 +672,7 @@ async function viewSettings() {
   } else {
     pushHtml = `<p>${isAdmin() ? 'Get notified when a new order is submitted.' : 'Get notified when your order is approved, ordered or delivered.'}</p><button class="btn" id="pushOn">Turn on notifications</button>`;
   }
-
+ 
   $app.innerHTML = `
     <h1>Account</h1>
     <div class="card stack">
@@ -691,7 +693,7 @@ async function viewSettings() {
       <button class="btn secondary" id="savePw">Update password</button>
     </div>
     <button class="btn danger block" id="out">Sign out</button>`;
-
+ 
   $('#saveP').onclick = async () => {
     const { error } = await sb.from('profiles').update({ full_name: $('#nm').value.trim() || null, phone: $('#ph').value.trim() || null }).eq('id', uid());
     if (error) return toast(error.message, true);
@@ -715,7 +717,7 @@ async function viewSettings() {
       out.className = 'error'; out.textContent = 'This device is registered to another login. Tap “Turn off”, then “Turn on notifications”.';
       test.disabled = false; return;
     }
-    const { data, error } = await sb.functions.invoke('notify', { body: { type: 'test', client_public_key: CFG.VAPID_PUBLIC_KEY } });
+    const { data, error } = await sb.functions.invoke(NOTIFY_FN, { body: { type: 'test', client_public_key: CFG.VAPID_PUBLIC_KEY } });
     test.disabled = false;
     if (error) {
       const why = await fnErrorText(error);
@@ -727,7 +729,7 @@ async function viewSettings() {
   };
   $('#out').onclick = async () => { await disablePush().catch(() => {}); await sb.auth.signOut(); };
 }
-
+ 
 // ---------------------------------------------------------------- start
 sb.auth.onAuthStateChange((event, session) => {
   // run outside the auth callback (supabase-js recommendation)
