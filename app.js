@@ -99,6 +99,21 @@ async function disablePush() {
     await sub.unsubscribe();
   }
 }
+// Turn a Supabase function error into a plain-English reason
+async function fnErrorText(error) {
+  try {
+    const body = await error.context.clone().json();
+    const msg = body?.error || body?.message || body?.msg;
+    if (msg) {
+      if (/not found/i.test(msg)) return 'Supabase can’t find a function named “notify”. Check the function name is exactly notify (lowercase) and that it’s deployed.';
+      if (/jwt/i.test(msg)) return `${msg}. In Supabase → Edge Functions → notify → Details, turn OFF “Verify JWT” (the function checks the login itself) and save.`;
+      return msg;
+    }
+  } catch {}
+  try { const t = await error.context.clone().text(); if (t) return t.slice(0, 300); } catch {}
+  if (error?.name === 'FunctionsFetchError') return 'Couldn’t reach the “notify” function. It may not be deployed, or it crashed on startup. Check Supabase → Edge Functions → notify → Logs.';
+  return error?.message || String(error);
+}
 const notify = (type, order_id) => sb.functions.invoke('notify', { body: { type, order_id } }).catch(() => {});
 
 // ---------------------------------------------------------------- data
@@ -651,7 +666,7 @@ async function viewSettings() {
   } else if (Notification.permission === 'denied') {
     pushHtml = `<p>Notifications are blocked for this app. Turn them on in your phone or browser settings, then reload.</p>`;
   } else if (sub && Notification.permission === 'granted') {
-    pushHtml = `<p>✅ Notifications are <b>on</b> for this device.</p><div class="row"><button class="btn secondary" id="test">Send test</button><button class="btn secondary" id="pushOff">Turn off</button></div>`;
+    pushHtml = `<p>✅ Notifications are <b>on</b> for this device.</p><div class="row"><button class="btn secondary" id="test">Send test</button><button class="btn secondary" id="pushOff">Turn off</button></div><div id="testResult" class="sub" style="margin-top:10px"></div>`;
   } else {
     pushHtml = `<p>${isAdmin() ? 'Get notified when a new order is submitted.' : 'Get notified when your order is approved, ordered or delivered.'}</p><button class="btn" id="pushOn">Turn on notifications</button>`;
   }
@@ -692,8 +707,23 @@ async function viewSettings() {
   if (on) on.onclick = async () => { try { on.disabled = true; await enablePush(); toast('Notifications on'); viewSettings(); } catch (e) { on.disabled = false; toast(errMsg(e), true); } };
   if (off) off.onclick = async () => { await disablePush(); toast('Notifications off'); viewSettings(); };
   if (test) test.onclick = async () => {
-    const { error } = await sb.functions.invoke('notify', { body: { type: 'test' } });
-    toast(error ? 'Test failed — check the notify function setup (README step 5)' : 'Test sent', !!error);
+    const out = $('#testResult');
+    test.disabled = true; out.className = 'sub'; out.textContent = 'Sending…';
+    // make sure this device is saved to your login before testing
+    const sub = await currentSub().catch(() => null);
+    if (sub && !(await saveSub(sub))) {
+      out.className = 'error'; out.textContent = 'This device is registered to another login. Tap “Turn off”, then “Turn on notifications”.';
+      test.disabled = false; return;
+    }
+    const { data, error } = await sb.functions.invoke('notify', { body: { type: 'test', client_public_key: CFG.VAPID_PUBLIC_KEY } });
+    test.disabled = false;
+    if (error) {
+      const why = await fnErrorText(error);
+      out.className = 'error'; out.textContent = 'Test failed: ' + why;
+      console.error('notify test failed', why, error);
+    } else {
+      out.className = 'sub'; out.textContent = `✅ Sent to ${data?.sent ?? 0} device(s). If nothing shows up within a minute, check that notifications are allowed for this app in your phone settings.`;
+    }
   };
   $('#out').onclick = async () => { await disablePush().catch(() => {}); await sb.auth.signOut(); };
 }
