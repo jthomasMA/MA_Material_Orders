@@ -12,12 +12,24 @@
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-title" content="Field Orders">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="styles.css">
+  <script>
+    // apply the saved light/dark choice before the page paints (no white flash)
+    (function () {
+      var t = 'light';
+      try { t = localStorage.getItem('fo-theme') || 'light'; } catch (e) {}
+      if (t === 'system') t = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+      document.documentElement.setAttribute('data-theme', t);
+    })();
+  </script>
 </head>
 <body>
   <header class="topbar">
-    <div class="brand"><img src="icons/icon-192.png" alt=""><span id="brand-name">Field Orders</span></div>
-    <div id="topbar-user" class="topbar-user"></div>
+    <div class="brand"><span class="company" id="company-name">M-A Building</span><span id="brand-name">Field Orders</span></div>
+    <a id="topbar-user" class="avatar" href="#/settings" aria-label="Account"></a>
   </header>
   <main id="app"><div class="loading">Loading…</div></main>
   <nav id="tabbar" class="tabbar hidden"></nav>

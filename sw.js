@@ -1,5 +1,5 @@
 // Service worker: lets the app install on phones, load fast, and receive push notifications.
-const CACHE = 'field-orders-v5';
+const CACHE = 'field-orders-v6';
 const SHELL = ['./', 'index.html', 'styles.css', 'app.js', 'config.js', 'manifest.webmanifest', 'icons/icon-192.png'];
 
 self.addEventListener('install', (e) => {

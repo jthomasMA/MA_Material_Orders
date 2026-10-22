@@ -7,6 +7,22 @@ const $tabbar = document.getElementById('tabbar');
 const $user = document.getElementById('topbar-user');
 document.getElementById('brand-name').textContent = CFG.APP_NAME || 'Field Orders';
 document.title = `${CFG.APP_NAME || 'Field Orders'} · ${CFG.COMPANY_NAME || ''}`;
+document.getElementById('company-name').textContent = CFG.COMPANY_NAME || '';
+
+// ---------------------------------------------------------------- light / dark theme
+const THEME_KEY = 'fo-theme';
+const darkQuery = window.matchMedia('(prefers-color-scheme: dark)');
+let themePref = (() => { try { return localStorage.getItem(THEME_KEY) || 'light'; } catch { return 'light'; } })();
+function applyTheme(pref) {
+  themePref = ['light', 'dark', 'system'].includes(pref) ? pref : 'light';
+  try { localStorage.setItem(THEME_KEY, themePref); } catch {}
+  const dark = themePref === 'dark' || (themePref === 'system' && darkQuery.matches);
+  document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light');
+  document.querySelector('meta[name=theme-color]')?.setAttribute('content', dark ? '#0B1220' : '#F4F5F7');
+}
+darkQuery.addEventListener?.('change', () => { if (themePref === 'system') applyTheme('system'); });
+applyTheme(themePref);
+const initialsOf = (name) => String(name || '').trim().split(/[\s@.]+/).filter(Boolean).slice(0, 2).map((w) => w[0].toUpperCase()).join('') || '?';
 
 // Supabase function that sends push notifications (the name at the end of its URL)
 const NOTIFY_FN = CFG.NOTIFY_FUNCTION || 'hyper-responder';
@@ -127,6 +143,7 @@ async function loadBasics() {
     sb.from('catalog_items').select('*').eq('active', true).order('category').order('name'),
   ]);
   state.profile = p.data || null;
+  if (state.profile?.theme) applyTheme(state.profile.theme);
   state.jobsites = j.data || [];
   state.catalog = c.data || [];
 }
@@ -152,7 +169,7 @@ async function route() {
   if (state.channel) { sb.removeChannel(state.channel); state.channel = null; }
   $app.classList.remove('wide');
   const parts = (location.hash.replace(/^#\/?/, '') || 'new').split('/');
-  $user.textContent = state.profile ? (state.profile.full_name || state.profile.email || '') : '';
+  $user.textContent = state.profile ? initialsOf(state.profile.full_name || state.profile.email) : '';
 
   if (state.recovery) { renderTabbar(); return viewSetPassword(); }
   if (!state.session) { renderTabbar(); return viewLogin(); }
@@ -293,13 +310,15 @@ function viewNewOrder() {
     $('#cart').innerHTML = draft.items.length
       ? draft.items.map((it, i) => `
         <div class="cart-item" data-i="${i}">
-          <div class="row spread"><div class="grow"><div class="name">${esc(it.item_name)}</div><div class="meta">${esc(it.category || '')}${it.catalog_item_id ? '' : ' · custom'}</div></div>
-            <button type="button" class="btn danger small" data-act="rm">Remove</button></div>
-          <div class="row wrap" style="margin-top:10px">
-            <div class="qty"><button type="button" data-act="dec">−</button><input type="number" inputmode="decimal" min="0" step="any" value="${esc(it.quantity)}" data-act="qty"><button type="button" data-act="inc">+</button></div>
-            <span class="sub">${esc(it.unit || '')}</span>
+          <div class="row">
+            ${itemTag(it)}
+            <div class="grow"><div class="name">${esc(it.item_name)}</div><div class="meta">${it.catalog_item_id ? '' : 'custom · '}${esc(it.unit || 'ea')}</div></div>
+            <div class="qty"><button type="button" data-act="dec" aria-label="Decrease">−</button><input type="number" inputmode="decimal" min="0" step="any" value="${esc(it.quantity)}" data-act="qty" aria-label="Quantity"><button type="button" data-act="inc" aria-label="Increase">+</button></div>
           </div>
-          <input type="text" placeholder="Notes (size, color, brand…)" value="${esc(it.notes || '')}" data-act="notes" style="margin-top:10px">
+          <div class="row notes-row">
+            <input type="text" class="notes grow" placeholder="Notes (size, color, brand…)" value="${esc(it.notes || '')}" data-act="notes">
+            <button type="button" class="rm" data-act="rm" aria-label="Remove ${esc(it.item_name)}"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"></path></svg></button>
+          </div>
         </div>`).join('')
       : `<div class="empty" style="padding:16px">Nothing added yet.</div>`;
   };
@@ -342,6 +361,7 @@ function viewNewOrder() {
   };
   $('#cart').onclick = (e) => {
     const b = e.target.closest('button[data-act]'); if (!b) return;
+    e.preventDefault();
     const i = Number(b.closest('.cart-item').dataset.i); const it = draft.items[i];
     if (b.dataset.act === 'rm') draft.items.splice(i, 1);
     if (b.dataset.act === 'inc') it.quantity = Number(it.quantity || 0) + 1;
@@ -386,24 +406,35 @@ function viewNewOrder() {
 const remainingOf = (i) => Math.max(0, Number(i.quantity) - Number(i.qty_delivered || 0));
 const isClosed = (o) => ['Delivered', 'Rejected', 'Cancelled'].includes(o.status);
 const claimerName = (o) => (o.claimer ? o.claimer.full_name || o.claimer.email : o.claimed_by ? 'Warehouse' : '');
+function itemTag(it) {
+  if (!it.catalog_item_id) return '<span class="tag new" aria-hidden="true">NEW</span>';
+  return it.category === 'Equipment' ? '<span class="tag eqp" aria-hidden="true">EQP</span>' : '<span class="tag mat" aria-hidden="true">MAT</span>';
+}
 function claimTag(o) {
   if (!o.claimed_by || isClosed(o)) return '';
-  if (o.claimed_by === uid()) return `<span class="claim-tag me">🔧 You’re pulling this</span>`;
-  return `<span class="claim-tag">🔧 ${esc(isStaff() ? claimerName(o) + ' is pulling' : 'Warehouse is pulling')}</span>`;
+  if (o.claimed_by === uid()) return `<span class="claim-tag me"><span class="initials">${esc(initialsOf(state.profile?.full_name))}</span>You’re pulling this</span>`;
+  const name = isStaff() ? claimerName(o) : 'Warehouse';
+  return `<span class="claim-tag"><span class="initials">${esc(initialsOf(name))}</span>${esc(name)} is pulling this</span>`;
 }
-function progressText(o) {
+function progressBar(o, extra = '') {
   const items = o.order_items || [];
+  if (o.status !== 'Partially Delivered' || !items.length) return '';
   const done = items.filter((i) => remainingOf(i) === 0).length;
-  return o.status === 'Partially Delivered' ? ` · <b>${done} of ${items.length} items complete</b>` : '';
+  const pct = Math.round((done / items.length) * 100);
+  return `<div class="progress"><div class="label"><span>${done} of ${items.length} items complete</span><span>${extra || pct + '%'}</span></div><div class="bar"><span style="width:${pct}%"></span></div></div>`;
 }
 
 function orderCard(o, showRequester) {
   const n = o.order_items?.length || 0;
-  return `<a class="card order-card ${o.claimed_by && !isClosed(o) ? 'claimed' : ''}" href="#/order/${o.id}">
-    <div class="row spread"><span class="order-no">${orderNo(o.id)}</span><span class="row">${o.priority === 'Urgent' ? badge('Urgent') : ''}${badge(o.status)}</span></div>
-    <div style="margin-top:4px;font-weight:600">${esc(jobLabel(o.jobsite))}</div>
-    <div class="meta">${n} item${n === 1 ? '' : 's'}${progressText(o)} · needed ${fmtDate(o.needed_by)}${showRequester ? ` · ${esc(o.requester?.full_name || o.requester?.email || '')}` : ''} · ${fmtDateTime(o.created_at)}</div>
-    ${claimTag(o)}
+  const claimed = o.claimed_by && !isClosed(o);
+  const foot = claimed ? `<div class="card-foot">${claimTag(o)}</div>`
+    : (showRequester && OPEN.includes(o.status) && o.status !== 'Partially Delivered' ? `<div class="card-foot"><span class="unclaimed">Nobody on it yet</span></div>` : '');
+  return `<a class="card order-card ${claimed ? 'claimed' : ''}" href="#/order/${o.id}">
+    <div class="row spread"><span class="order-no">${orderNo(o.id)}</span><span class="row" style="gap:6px">${o.priority === 'Urgent' ? badge('Urgent') : ''}${badge(o.status)}</span></div>
+    <div class="job">${esc(o.jobsite?.name || jobLabel(o.jobsite))}</div>
+    <div class="meta">${n} item${n === 1 ? '' : 's'} · needed ${fmtDate(o.needed_by)}${showRequester ? ` · ${esc(o.requester?.full_name || o.requester?.email || '')}` : ''}</div>
+    ${progressBar(o)}
+    ${foot}
   </a>`;
 }
 
@@ -443,18 +474,23 @@ async function viewOrder(id) {
 
   let claimBox = '';
   if (!closed && staff) {
-    if (!o.claimed_by) claimBox = `<div class="claim-box open no-print"><div class="grow"><b>Nobody is pulling this order yet.</b><div class="meta">Claim it so the other guys know you’ve got it.</div></div><button class="btn" id="claim">I’m pulling this</button></div>`;
-    else if (claimedByMe) claimBox = `<div class="claim-box mine no-print"><div class="grow">🔧 <b>You’re pulling this order</b><div class="meta">since ${fmtDateTime(o.claimed_at)}</div></div><button class="btn secondary small" id="release">Release</button></div>`;
-    else claimBox = `<div class="claim-box other no-print"><div class="grow">🔧 <b>${esc(who)} is pulling this order</b><div class="meta">since ${fmtDateTime(o.claimed_at)} — no need to go get it</div></div><button class="btn secondary small" id="takeover">Take over</button></div>`;
+    if (!o.claimed_by) claimBox = `<div class="claim-box open no-print"><div class="grow"><b>Nobody is pulling this order yet</b><div class="meta">Claim it so the other guys know you’ve got it.</div></div><button class="btn" id="claim">I’m pulling this</button></div>`;
+    else if (claimedByMe) claimBox = `<div class="claim-box mine no-print"><span class="initials">${esc(initialsOf(state.profile?.full_name))}</span><div class="grow"><b>You’re pulling this order</b><div class="meta">since ${fmtDateTime(o.claimed_at)}</div></div><button class="btn secondary small" id="release">Release</button></div>`;
+    else claimBox = `<div class="claim-box other no-print"><span class="initials">${esc(initialsOf(who))}</span><div class="grow"><b>${esc(who)} is pulling this order</b><div class="meta">since ${fmtDateTime(o.claimed_at)} — no need to go get it</div></div><button class="btn secondary small" id="takeover">Take over</button></div>`;
   } else if (!closed && o.claimed_by) {
-    claimBox = `<div class="claim-box mine">🔧 <b>The warehouse is pulling your order</b> · since ${fmtDateTime(o.claimed_at)}</div>`;
+    claimBox = `<div class="claim-box other"><span class="initials">W</span><div class="grow"><b>The warehouse is pulling your order</b><div class="meta">since ${fmtDateTime(o.claimed_at)}</div></div></div>`;
   }
 
   const itemRows = items.map((it) => {
     const rem = remainingOf(it);
     const del = Number(it.qty_delivered || 0);
-    const delCell = !showDelivered ? '' : `<td class="num">${rem === 0 ? `<span class="done">✓ ${fmtQty(del)}</span>` : del > 0 ? `<span class="partial">${fmtQty(del)}</span><div class="meta">${fmtQty(rem)} to go</div>` : `<span class="meta">0</span>`}</td>`;
-    return `<tr><td><b>${esc(it.item_name)}</b>${it.category ? `<div class="meta">${esc(it.category)}${it.catalog_item_id ? '' : ' · custom'}</div>` : ''}${it.notes ? `<div class="meta">${esc(it.notes)}</div>` : ''}</td><td class="num">${fmtQty(it.quantity)}</td><td>${esc(it.unit || '')}</td>${delCell}</tr>`;
+    const st = rem === 0 && del > 0 ? 'done' : del > 0 ? 'part' : showDelivered ? 'wait' : 'open';
+    const icon = st === 'done' ? '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12l5 5 9-10"></path></svg>' : st === 'open' ? '' : '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="8"></circle><path d="M12 8v4l2.5 2"></path></svg>';
+    const right = st === 'done' ? '<span class="done">Done</span>' : st === 'part' ? `<span class="partial">${fmtQty(rem)} left</span>` : st === 'wait' ? `<span class="meta">${fmtQty(rem)} left</span>` : '';
+    const qtyText = showDelivered ? `${fmtQty(del)} of ${fmtQty(it.quantity)} ${esc(it.unit || '')}` : `${fmtQty(it.quantity)} ${esc(it.unit || '')}`;
+    return `<div class="item-row">${st === 'open' ? itemTag(it) : `<span class="state-dot ${st}">${icon}</span>`}
+      <div class="grow"><b>${esc(it.item_name)}</b><div class="meta">${qtyText}${it.catalog_item_id ? '' : ' · custom'}${it.notes ? ' · ' + esc(it.notes) : ''}</div></div>
+      <div class="right">${right}</div></div>`;
   }).join('');
 
   const deliverBox = (!staff || closed || !openItems.length) ? '' : `
@@ -481,31 +517,29 @@ async function viewOrder(id) {
 
   const log = (events || []).length ? `
     <div class="card"><h2>Activity</h2>
-      ${events.map((e) => `<div class="event ${esc(e.kind)}"><div>${esc(e.message)}</div><div class="meta">${esc(e.user?.full_name || e.user?.email || '')}${e.user ? ' · ' : ''}${fmtDateTime(e.created_at)}</div></div>`).join('')}
+      ${events.map((e) => `<div class="event ${esc(e.kind)}"><div><div>${esc(e.message)}</div><div class="meta">${esc(e.user?.full_name || e.user?.email || '')}${e.user ? ' · ' : ''}${fmtDateTime(e.created_at)}</div></div></div>`).join('')}
     </div>` : '';
 
   $app.innerHTML = `<div id="orderView">
     <div class="row spread no-print" style="margin-bottom:8px">
-      <a href="${staff ? '#/admin' : '#/orders'}" class="linkbtn">← Back</a>
+      <a href="${staff ? '#/admin' : '#/orders'}" class="btn secondary small" aria-label="Back">← Back</a>
       <div class="row"><button class="btn secondary small" id="print">Print</button>${mine || isAdmin() ? `<button class="btn secondary small" id="reorder">Reorder</button>` : ''}</div>
     </div>
-    ${claimBox}
-    <div class="card">
-      <div class="row spread"><h1 style="margin:0">${orderNo(o.id)}</h1><span class="row">${o.priority === 'Urgent' ? badge('Urgent') : ''}${badge(o.status)}</span></div>
-      <dl class="kv" style="margin-top:12px">
-        <dt>Jobsite</dt><dd><b>${esc(jobLabel(o.jobsite))}</b>${o.jobsite?.address ? `<br><span class="meta">${esc(o.jobsite.address)}</span>` : ''}</dd>
+    <section class="hero">
+      <div class="row spread"><span class="row" style="gap:6px">${o.priority === 'Urgent' ? badge('Urgent') : ''}${badge(o.status)}</span><span class="meta">Needed ${fmtDate(o.needed_by)}</span></div>
+      <h1>${esc(o.jobsite?.name || jobLabel(o.jobsite))}</h1>
+      <div class="meta">${orderNo(o.id)}${o.jobsite?.job_number ? ' · Job ' + esc(o.jobsite.job_number) : ''}${o.jobsite?.address ? ' · ' + esc(o.jobsite.address) : ''}</div>
+      ${progressBar(o)}
+      <dl class="kv">
         <dt>Requested by</dt><dd>${esc(o.requester?.full_name || o.requester?.email || '')}${o.requester?.phone ? ` · <a href="tel:${esc(o.requester.phone)}">${esc(o.requester.phone)}</a>` : ''}</dd>
         <dt>Submitted</dt><dd>${fmtDateTime(o.created_at)}</dd>
-        <dt>Needed by</dt><dd>${fmtDate(o.needed_by)}</dd>
         <dt>Delivery</dt><dd>${esc(o.delivery_method)}</dd>
         ${o.delivery_notes ? `<dt>Notes</dt><dd style="white-space:pre-wrap">${esc(o.delivery_notes)}</dd>` : ''}
         ${o.admin_notes ? `<dt>Office notes</dt><dd style="white-space:pre-wrap">${esc(o.admin_notes)}</dd>` : ''}
       </dl>
-    </div>
-    <div class="card">
-      <h2>Items</h2>
-      <table class="items"><thead><tr><th>Item</th><th class="num">Ordered</th><th>Unit</th>${showDelivered ? '<th class="num">Delivered</th>' : ''}</tr></thead><tbody>${itemRows}</tbody></table>
-    </div>
+    </section>
+    ${claimBox}
+    <div class="card" style="padding-top:6px;padding-bottom:6px">${itemRows}</div>
     ${deliverBox}
     ${adminBox}
     ${log}
@@ -895,6 +929,13 @@ async function viewSettings() {
       <div class="sub">${esc(p.email || '')} · ${{ admin: 'Admin', warehouse: 'Warehouse', field: 'Field' }[p.role] || p.role}</div>
       <button class="btn secondary" id="saveP">Save</button>
     </div>
+    <div class="card stack">
+      <h2>Appearance</h2>
+      <div class="seg" id="theme" role="group" aria-label="Theme">
+        ${[['light', 'Light'], ['dark', 'Dark'], ['system', 'Match phone']].map(([v, l]) => `<button type="button" data-v="${v}" class="${themePref === v ? 'on' : ''}" aria-pressed="${themePref === v}">${l}</button>`).join('')}
+      </div>
+      <div class="sub">Dark mode is easier on the eyes early in the morning and at night.</div>
+    </div>
     <div class="card"><h2>Notifications</h2>${pushHtml}</div>
     <div class="card">
       <h2>Install on your phone</h2>
@@ -907,6 +948,14 @@ async function viewSettings() {
     </div>
     <button class="btn danger block" id="out">Sign out</button>`;
 
+  $('#theme').onclick = async (e) => {
+    const b = e.target.closest('button[data-v]'); if (!b) return;
+    applyTheme(b.dataset.v);
+    $$('#theme button').forEach((x) => { x.classList.toggle('on', x === b); x.setAttribute('aria-pressed', x === b); });
+    // remember it on the account so it follows them to other devices
+    const { error } = await sb.from('profiles').update({ theme: b.dataset.v }).eq('id', uid());
+    if (!error && state.profile) state.profile.theme = b.dataset.v;
+  };
   $('#saveP').onclick = async () => {
     const { error } = await sb.from('profiles').update({ full_name: $('#nm').value.trim() || null, phone: $('#ph').value.trim() || null }).eq('id', uid());
     if (error) return toast(error.message, true);
