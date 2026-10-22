@@ -749,28 +749,124 @@ const adminJobsites = (pane) => adminList(pane, {
   help: 'Hide a jobsite when the job closes so it no longer appears for field crews.',
 });
 
-async function adminUsers(pane) {
+const ROLE_OPTS = [['field', 'Field'], ['warehouse', 'Warehouse'], ['admin', 'Admin']];
+const roleSelect = (val, attrs = '') => `<select ${attrs}>${ROLE_OPTS.map(([v, l]) => `<option value="${v}" ${v === val ? 'selected' : ''}>${l}</option>`).join('')}</select>`;
+function makePassword() {
+  const chars = 'ABCDEFGHJKMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789';
+  const bytes = crypto.getRandomValues(new Uint8Array(10));
+  return [...bytes].map((b) => chars[b % chars.length]).join('');
+}
+// Calls the notify function's admin actions (it holds the key needed to manage logins)
+async function adminCall(type, payload) {
+  const { data, error } = await sb.functions.invoke(NOTIFY_FN, { body: { type, ...payload } });
+  if (error) throw new Error(await fnErrorText(error));
+  if (data?.error) throw new Error(data.error);
+  return data;
+}
+
+async function adminUsers(pane, notice = '') {
   const { data, error } = await sb.from('profiles').select('*').order('full_name');
   if (error) throw error;
+  let showDisabled = false;
+  const active = (p) => p.active !== false;
+
   pane.innerHTML = `
     <h1>Users</h1>
-    <div class="banner"><b>To add an employee:</b> Supabase dashboard → Authentication → Users → <i>Add user</i> → <i>Create new user</i>.
-      Enter their email and a starting password and check “Auto confirm”. They’ll appear here — then set their name and role.</div>
-    <div class="card">${data.map((p) => `
-      <div class="list-row wrap" data-id="${p.id}">
-        <div class="grow" style="min-width:200px"><input type="text" data-k="full_name" value="${esc(p.full_name || '')}" placeholder="Full name"><div class="meta" style="margin-top:4px">${esc(p.email || '')}</div></div>
-        <input type="tel" data-k="phone" value="${esc(p.phone || '')}" placeholder="Phone" style="max-width:160px">
-        <select data-k="role" style="max-width:130px"><option value="field" ${p.role === 'field' ? 'selected' : ''}>Field</option><option value="warehouse" ${p.role === 'warehouse' ? 'selected' : ''}>Warehouse</option><option value="admin" ${p.role === 'admin' ? 'selected' : ''}>Admin</option></select>
-      </div>`).join('')}</div>`;
-  $$('[data-k]', pane).forEach((el) => {
-    el.onchange = async () => {
-      const id = el.closest('.list-row').dataset.id;
-      if (el.dataset.k === 'role' && id === uid() && el.value !== 'admin' && !confirm('Remove your own admin access?')) { el.value = 'admin'; return; }
-      const { error: e } = await sb.from('profiles').update({ [el.dataset.k]: el.value.trim() || null }).eq('id', id);
-      if (e) toast(e.message, true); else toast('Saved');
-      if (id === uid()) { await loadBasics(); route(); }
+    ${notice}
+    <div class="card stack" id="addUser">
+      <h2>Add an employee</h2>
+      <div class="grid2">
+        <div class="field"><label>Full name</label><input type="text" id="nuName" placeholder="Mike Rivera"></div>
+        <div class="field"><label>Email (their login)</label><input type="email" id="nuEmail" placeholder="mike@mabldg.com" autocomplete="off"></div>
+        <div class="field"><label>Phone <span class="sub">(optional)</span></label><input type="tel" id="nuPhone"></div>
+        <div class="field"><label>Role</label>${roleSelect('field', 'id="nuRole"')}</div>
+      </div>
+      <div class="field"><label>Starting password <span class="sub">(8+ characters — they can change it under Account)</span></label>
+        <div class="row"><input type="text" id="nuPw" class="grow" autocomplete="off" value="${makePassword()}"><button type="button" class="btn secondary small" id="nuGen">New</button></div></div>
+      <button class="btn" id="nuAdd">Add employee</button>
+    </div>
+    <div class="card">
+      <div class="row spread wrap"><h2 style="margin:0">Employees</h2>
+        <label class="row" style="font-weight:600;margin:0"><input type="checkbox" id="showDis"> Show disabled</label></div>
+      <div id="userRows"></div>
+    </div>`;
+
+  const drawRows = () => {
+    const list = data.filter((p) => showDisabled || active(p));
+    $('#userRows', pane).innerHTML = list.map((p) => `
+      <div class="user-row ${active(p) ? '' : 'inactive'}" data-id="${p.id}">
+        <div class="list-row wrap">
+          <div class="grow" style="min-width:200px"><input type="text" data-k="full_name" value="${esc(p.full_name || '')}" placeholder="Full name">
+            <div class="meta" style="margin-top:4px">${esc(p.email || '')}${active(p) ? '' : ' · <b>login disabled</b>'}${p.id === uid() ? ' · you' : ''}</div></div>
+          <input type="tel" data-k="phone" value="${esc(p.phone || '')}" placeholder="Phone" style="max-width:150px">
+          ${roleSelect(p.role, 'data-k="role" style="max-width:130px"')}
+          <button class="btn secondary small" data-act="pw">Set password</button>
+          ${p.id === uid() ? '' : `<button class="btn ${active(p) ? 'danger' : 'secondary'} small" data-act="toggle">${active(p) ? 'Disable' : 'Enable'}</button>`}
+        </div>
+        <div class="pw-box hidden row wrap">
+          <input type="text" class="grow" data-pw autocomplete="off" value="${makePassword()}" aria-label="New password">
+          <button class="btn small" data-act="pwSave">Save password</button>
+          <button class="btn secondary small" data-act="pwCancel">Cancel</button>
+        </div>
+      </div>`).join('') || '<div class="empty">No employees yet.</div>';
+  };
+  drawRows();
+
+  $('#showDis', pane).onchange = (e) => { showDisabled = e.target.checked; drawRows(); };
+  $('#nuGen', pane).onclick = () => { $('#nuPw', pane).value = makePassword(); };
+  $('#nuAdd', pane).onclick = async () => {
+    const rec = {
+      full_name: $('#nuName', pane).value.trim(), email: $('#nuEmail', pane).value.trim().toLowerCase(),
+      phone: $('#nuPhone', pane).value.trim(), role: $('#nuRole', pane).value, password: $('#nuPw', pane).value,
     };
-  });
+    if (!rec.full_name || !rec.email) return toast('Enter a name and email', true);
+    if (rec.password.length < 8) return toast('Password needs at least 8 characters', true);
+    const btn = $('#nuAdd', pane); btn.disabled = true; btn.textContent = 'Adding…';
+    try {
+      await adminCall('admin_create_user', rec);
+      adminUsers(pane, `<div class="banner"><b>${esc(rec.full_name)} can sign in now.</b> Send them the app link and these details:<br>
+        Email: <b>${esc(rec.email)}</b> &nbsp; Password: <b>${esc(rec.password)}</b></div>`);
+    } catch (e) { toast(errMsg(e), true); btn.disabled = false; btn.textContent = 'Add employee'; }
+  };
+
+  const rows = $('#userRows', pane);
+  rows.onchange = async (ev) => {
+    const el = ev.target; if (!el.dataset.k) return;
+    const id = el.closest('.user-row').dataset.id;
+    if (el.dataset.k === 'role' && id === uid() && el.value !== 'admin' && !confirm('Remove your own admin access?')) { el.value = 'admin'; return; }
+    const { error: e } = await sb.from('profiles').update({ [el.dataset.k]: el.value.trim() || null }).eq('id', id);
+    if (e) toast(e.message, true); else { toast('Saved'); const p = data.find((x) => x.id === id); if (p) p[el.dataset.k] = el.value.trim() || null; }
+    if (id === uid()) { await loadBasics(); route(); }
+  };
+  rows.onclick = async (ev) => {
+    const b = ev.target.closest('button[data-act]'); if (!b) return;
+    const row = b.closest('.user-row'); const id = row.dataset.id; const p = data.find((x) => x.id === id);
+    const box = $('.pw-box', row);
+    if (b.dataset.act === 'pw') { box.classList.toggle('hidden'); $('[data-pw]', box).select(); return; }
+    if (b.dataset.act === 'pwCancel') { box.classList.add('hidden'); return; }
+    if (b.dataset.act === 'pwSave') {
+      const pw = $('[data-pw]', box).value;
+      if (pw.length < 8) return toast('Password needs at least 8 characters', true);
+      b.disabled = true;
+      try {
+        await adminCall('admin_set_password', { user_id: id, password: pw });
+        box.classList.add('hidden');
+        toast(`Password changed for ${p.full_name || p.email}. New password: ${pw}`);
+      } catch (e) { toast(errMsg(e), true); }
+      b.disabled = false;
+      return;
+    }
+    if (b.dataset.act === 'toggle') {
+      const enable = !active(p);
+      if (!enable && !confirm(`Disable ${p.full_name || p.email}? They won’t be able to sign in. Their past orders stay.`)) return;
+      b.disabled = true;
+      try {
+        await adminCall('admin_set_active', { user_id: id, active: enable });
+        p.active = enable; drawRows();
+        toast(enable ? 'Login enabled' : 'Login disabled');
+      } catch (e) { toast(errMsg(e), true); b.disabled = false; }
+    }
+  };
 }
 
 // ---------------------------------------------------------------- settings
@@ -860,4 +956,3 @@ sb.auth.onAuthStateChange((event, session) => {
     if (event === 'PASSWORD_RECOVERY') route();
   }, 0);
 });
-   
