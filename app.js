@@ -860,6 +860,4 @@ sb.auth.onAuthStateChange((event, session) => {
     if (event === 'PASSWORD_RECOVERY') route();
   }, 0);
 });
-    if (event === 'PASSWORD_RECOVERY') route();
-  }, 0);
-});
+   
