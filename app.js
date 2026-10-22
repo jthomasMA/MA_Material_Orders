@@ -1,18 +1,18 @@
 // M-A Building Field Orders — single-page app (no build step needed)
 import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/+esm';
- 
+
 const CFG = window.APP_CONFIG || {};
 const $app = document.getElementById('app');
 const $tabbar = document.getElementById('tabbar');
 const $user = document.getElementById('topbar-user');
 document.getElementById('brand-name').textContent = CFG.APP_NAME || 'Field Orders';
 document.title = `${CFG.APP_NAME || 'Field Orders'} · ${CFG.COMPANY_NAME || ''}`;
- 
+
 // Supabase function that sends push notifications (the name at the end of its URL)
 const NOTIFY_FN = CFG.NOTIFY_FUNCTION || 'hyper-responder';
-const STATUSES = ['Pending', 'Approved', 'Ordered', 'Delivered', 'Rejected', 'Cancelled'];
-const OPEN = ['Pending', 'Approved', 'Ordered'];
- 
+const STATUSES = ['Pending', 'Approved', 'Ordered', 'Partially Delivered', 'Delivered', 'Rejected', 'Cancelled'];
+const OPEN = ['Pending', 'Approved', 'Ordered', 'Partially Delivered'];
+
 // ---------------------------------------------------------------- helpers
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const orderNo = (id) => 'MR-' + String(id).padStart(5, '0');
@@ -24,10 +24,10 @@ const fmtDate = (d) => {
 const fmtDateTime = (d) => (d ? new Date(d).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '—');
 const fmtQty = (n) => (Number.isInteger(Number(n)) ? String(Number(n)) : String(Number(n)));
 const jobLabel = (j) => (j ? [j.job_number, j.name].filter(Boolean).join(' — ') : '—');
-const badge = (s) => `<span class="badge ${esc(s)}">${esc(s)}</span>`;
+const badge = (s) => `<span class="badge ${esc(String(s).replace(/\s+/g, ''))}">${esc(s)}</span>`;
 const $ = (sel, root = $app) => root.querySelector(sel);
 const $$ = (sel, root = $app) => [...root.querySelectorAll(sel)];
- 
+
 let toastTimer;
 function toast(msg, isErr = false) {
   const t = document.getElementById('toast');
@@ -37,33 +37,34 @@ function toast(msg, isErr = false) {
   toastTimer = setTimeout(() => t.classList.add('hidden'), isErr ? 6000 : 3200);
 }
 const errMsg = (e) => (e && (e.message || e.error_description)) || String(e);
- 
+
 // ---------------------------------------------------------------- not configured yet
 if (!CFG.SUPABASE_URL || CFG.SUPABASE_URL.includes('YOUR-PROJECT')) {
   $app.innerHTML = `<div class="card login"><h1>Almost there</h1>
     <p>Open <b>config.js</b> and paste in your Supabase project URL and anon key. See <b>README.md</b>, step 2.</p></div>`;
   throw new Error('APP_CONFIG not set');
 }
- 
+
 const sb = createClient(CFG.SUPABASE_URL, CFG.SUPABASE_ANON_KEY);
 const state = { session: null, profile: null, jobsites: [], catalog: [], recovery: false, channel: null };
 const isAdmin = () => state.profile?.role === 'admin';
+const isStaff = () => ['admin', 'warehouse'].includes(state.profile?.role);
 const uid = () => state.session?.user?.id;
- 
+
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
- 
+
 // ---------------------------------------------------------------- order draft (survives refresh)
 const DRAFT_KEY = 'fo-draft-v1';
 const blankDraft = () => ({ jobsite_id: '', needed_by: '', priority: 'Normal', delivery_method: 'Deliver to site', delivery_notes: '', items: [] });
 let draft = (() => { try { return JSON.parse(localStorage.getItem(DRAFT_KEY)) || blankDraft(); } catch { return blankDraft(); } })();
 const saveDraft = () => { try { localStorage.setItem(DRAFT_KEY, JSON.stringify(draft)); } catch {} };
- 
+
 // ---------------------------------------------------------------- push notifications
 const pushSupported = () => 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
 const isIOS = /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 const isStandalone = () => window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
 const vapidReady = () => CFG.VAPID_PUBLIC_KEY && !CFG.VAPID_PUBLIC_KEY.startsWith('YOUR-');
- 
+
 function b64ToUint8(base64) {
   const pad = '='.repeat((4 - (base64.length % 4)) % 4);
   const raw = atob((base64 + pad).replace(/-/g, '+').replace(/_/g, '/'));
@@ -117,7 +118,7 @@ async function fnErrorText(error) {
   return error?.message || String(error);
 }
 const notify = (type, order_id) => sb.functions.invoke(NOTIFY_FN, { body: { type, order_id } }).catch(() => {});
- 
+
 // ---------------------------------------------------------------- data
 async function loadBasics() {
   const [p, j, c] = await Promise.all([
@@ -129,8 +130,8 @@ async function loadBasics() {
   state.jobsites = j.data || [];
   state.catalog = c.data || [];
 }
-const ORDER_SELECT = '*, jobsite:jobsites(id, name, job_number, address), requester:profiles(full_name, email, phone), order_items(*)';
- 
+const ORDER_SELECT = '*, jobsite:jobsites(id, name, job_number, address), requester:profiles!orders_requested_by_fkey(full_name, email, phone), claimer:profiles!orders_claimed_by_fkey(full_name, email), order_items(*)';
+
 // ---------------------------------------------------------------- router
 const ICONS = {
   new: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/></svg>',
@@ -141,18 +142,18 @@ const ICONS = {
 function renderTabbar(active) {
   if (!state.session || state.recovery) { $tabbar.classList.add('hidden'); return; }
   const tabs = [['new', '#/new', 'New Order'], ['orders', '#/orders', 'My Orders']];
-  if (isAdmin()) tabs.push(['admin', '#/admin', 'Admin']);
+  if (isStaff()) tabs.push(['admin', '#/admin', isAdmin() ? 'Admin' : 'Queue']);
   tabs.push(['settings', '#/settings', 'Account']);
   $tabbar.innerHTML = tabs.map(([k, href, label]) => `<a href="${href}" class="${active === k ? 'on' : ''}">${ICONS[k]}<span>${label}</span></a>`).join('');
   $tabbar.classList.remove('hidden');
 }
- 
+
 async function route() {
   if (state.channel) { sb.removeChannel(state.channel); state.channel = null; }
   $app.classList.remove('wide');
   const parts = (location.hash.replace(/^#\/?/, '') || 'new').split('/');
   $user.textContent = state.profile ? (state.profile.full_name || state.profile.email || '') : '';
- 
+
   if (state.recovery) { renderTabbar(); return viewSetPassword(); }
   if (!state.session) { renderTabbar(); return viewLogin(); }
   if (!state.profile) {
@@ -164,8 +165,8 @@ async function route() {
   const [page, a, b] = parts;
   try {
     if (page === 'orders') { renderTabbar('orders'); return await viewMyOrders(); }
-    if (page === 'order') { renderTabbar(isAdmin() ? 'admin' : 'orders'); return await viewOrder(Number(a)); }
-    if (page === 'admin' && isAdmin()) { renderTabbar('admin'); return await viewAdmin(a || 'orders', b); }
+    if (page === 'order') { renderTabbar(isStaff() ? 'admin' : 'orders'); return await viewOrder(Number(a)); }
+    if (page === 'admin' && isStaff()) { renderTabbar('admin'); return await viewAdmin(a || 'orders', b); }
     if (page === 'settings') { renderTabbar('settings'); return await viewSettings(); }
     renderTabbar('new');
     return viewNewOrder();
@@ -174,7 +175,7 @@ async function route() {
   }
 }
 window.addEventListener('hashchange', route);
- 
+
 // ---------------------------------------------------------------- auth views
 function viewLogin() {
   $app.innerHTML = `
@@ -205,7 +206,7 @@ function viewLogin() {
     if (error) toast(error.message, true); else toast('Check your email for a reset link.');
   };
 }
- 
+
 function viewSetPassword() {
   $app.innerHTML = `
   <div class="login"><form class="card" id="f"><h1>Set a new password</h1>
@@ -225,12 +226,12 @@ function viewSetPassword() {
     route();
   };
 }
- 
+
 function pushBanner() {
-  if (!isAdmin() || !pushSupported() || !vapidReady() || Notification.permission !== 'default') return '';
+  if (!isStaff() || !pushSupported() || !vapidReady() || Notification.permission !== 'default') return '';
   return `<div class="banner">🔔 Get a notification on this device when a new order comes in. <a href="#/settings">Turn on</a></div>`;
 }
- 
+
 // ---------------------------------------------------------------- new order
 function viewNewOrder() {
   const jobOpts = state.jobsites.map((j) => `<option value="${j.id}" ${String(j.id) === String(draft.jobsite_id) ? 'selected' : ''}>${esc(jobLabel(j))}</option>`).join('');
@@ -252,7 +253,7 @@ function viewNewOrder() {
       <div class="field"><label for="dn">Delivery notes <span class="sub">(gate code, where to drop, contact)</span></label>
         <textarea id="dn">${esc(draft.delivery_notes)}</textarea></div>
     </div>
- 
+
     <div class="card">
       <h2>Add items</h2>
       <div class="chips" id="cats">
@@ -270,7 +271,7 @@ function viewNewOrder() {
         <button type="button" class="btn" id="cAdd">Add to order</button>
       </div>
     </div>
- 
+
     <div class="card">
       <div class="row spread"><h2 style="margin:0">Order list</h2><span class="sub" id="count"></span></div>
       <div id="cart" style="margin-top:12px"></div>
@@ -278,7 +279,7 @@ function viewNewOrder() {
     <div class="error hidden" id="er" style="margin-bottom:10px"></div>
     <button class="btn block" id="submit">Submit order</button>
     <div style="text-align:center;margin-top:8px"><button class="linkbtn" id="clear">Clear form</button></div>`;
- 
+
   let cat = 'All';
   const renderResults = () => {
     const q = $('#q').value.trim().toLowerCase();
@@ -309,9 +310,9 @@ function viewNewOrder() {
     saveDraft(); renderCart();
     toast(`Added: ${it.item_name}`);
   };
- 
+
   renderResults(); renderCart();
- 
+
   $('#job').onchange = (e) => { draft.jobsite_id = e.target.value; saveDraft(); };
   $('#need').onchange = (e) => { draft.needed_by = e.target.value; saveDraft(); };
   $('#dn').oninput = (e) => { draft.delivery_notes = e.target.value; saveDraft(); };
@@ -355,7 +356,7 @@ function viewNewOrder() {
     saveDraft();
   };
   $('#clear').onclick = () => { if (confirm('Clear this order form?')) { draft = blankDraft(); saveDraft(); viewNewOrder(); } };
- 
+
   $('#submit').onclick = async () => {
     const er = $('#er'); er.classList.add('hidden');
     const fail = (m) => { er.textContent = m; er.classList.remove('hidden'); };
@@ -380,17 +381,32 @@ function viewNewOrder() {
     location.hash = `#/order/${id}`;
   };
 }
- 
+
 // ---------------------------------------------------------------- order lists
+const remainingOf = (i) => Math.max(0, Number(i.quantity) - Number(i.qty_delivered || 0));
+const isClosed = (o) => ['Delivered', 'Rejected', 'Cancelled'].includes(o.status);
+const claimerName = (o) => (o.claimer ? o.claimer.full_name || o.claimer.email : o.claimed_by ? 'Warehouse' : '');
+function claimTag(o) {
+  if (!o.claimed_by || isClosed(o)) return '';
+  if (o.claimed_by === uid()) return `<span class="claim-tag me">🔧 You’re pulling this</span>`;
+  return `<span class="claim-tag">🔧 ${esc(isStaff() ? claimerName(o) + ' is pulling' : 'Warehouse is pulling')}</span>`;
+}
+function progressText(o) {
+  const items = o.order_items || [];
+  const done = items.filter((i) => remainingOf(i) === 0).length;
+  return o.status === 'Partially Delivered' ? ` · <b>${done} of ${items.length} items complete</b>` : '';
+}
+
 function orderCard(o, showRequester) {
   const n = o.order_items?.length || 0;
-  return `<a class="card order-card" href="#/order/${o.id}">
+  return `<a class="card order-card ${o.claimed_by && !isClosed(o) ? 'claimed' : ''}" href="#/order/${o.id}">
     <div class="row spread"><span class="order-no">${orderNo(o.id)}</span><span class="row">${o.priority === 'Urgent' ? badge('Urgent') : ''}${badge(o.status)}</span></div>
     <div style="margin-top:4px;font-weight:600">${esc(jobLabel(o.jobsite))}</div>
-    <div class="meta">${n} item${n === 1 ? '' : 's'} · needed ${fmtDate(o.needed_by)}${showRequester ? ` · ${esc(o.requester?.full_name || o.requester?.email || '')}` : ''} · ${fmtDateTime(o.created_at)}</div>
+    <div class="meta">${n} item${n === 1 ? '' : 's'}${progressText(o)} · needed ${fmtDate(o.needed_by)}${showRequester ? ` · ${esc(o.requester?.full_name || o.requester?.email || '')}` : ''} · ${fmtDateTime(o.created_at)}</div>
+    ${claimTag(o)}
   </a>`;
 }
- 
+
 async function viewMyOrders() {
   $app.innerHTML = `<h1>My orders</h1><div class="loading">Loading…</div>`;
   const { data, error } = await sb.from('orders').select(ORDER_SELECT).eq('requested_by', uid()).order('created_at', { ascending: false }).limit(200);
@@ -406,20 +422,74 @@ async function viewMyOrders() {
   $('#f').onclick = (e) => { const b = e.target.closest('.chip'); if (!b) return; filter = b.dataset.f; $$('#f .chip').forEach((x) => x.classList.toggle('on', x === b)); draw(); };
   draw();
 }
- 
+
 // ---------------------------------------------------------------- order detail
 async function viewOrder(id) {
-  $app.innerHTML = `<div class="loading">Loading…</div>`;
-  const { data: o, error } = await sb.from('orders').select(ORDER_SELECT).eq('id', id).single();
+  if (!$('#orderView')) $app.innerHTML = `<div class="loading">Loading…</div>`;
+  const [{ data: o, error }, { data: events }] = await Promise.all([
+    sb.from('orders').select(ORDER_SELECT).eq('id', id).single(),
+    sb.from('order_events').select('*, user:profiles(full_name, email)').eq('order_id', id).order('created_at', { ascending: false }),
+  ]);
   if (error || !o) throw new Error('Order not found');
   const mine = o.requested_by === uid();
+  const staff = isStaff();
+  const closed = isClosed(o);
   const items = (o.order_items || []).sort((a, b) => a.id - b.id);
- 
-  $app.innerHTML = `
+  const anyDelivered = items.some((i) => Number(i.qty_delivered) > 0);
+  const showDelivered = anyDelivered || o.status === 'Partially Delivered';
+  const claimedByMe = o.claimed_by === uid();
+  const who = claimerName(o);
+  const openItems = items.filter((i) => remainingOf(i) > 0);
+
+  let claimBox = '';
+  if (!closed && staff) {
+    if (!o.claimed_by) claimBox = `<div class="claim-box open no-print"><div class="grow"><b>Nobody is pulling this order yet.</b><div class="meta">Claim it so the other guys know you’ve got it.</div></div><button class="btn" id="claim">I’m pulling this</button></div>`;
+    else if (claimedByMe) claimBox = `<div class="claim-box mine no-print"><div class="grow">🔧 <b>You’re pulling this order</b><div class="meta">since ${fmtDateTime(o.claimed_at)}</div></div><button class="btn secondary small" id="release">Release</button></div>`;
+    else claimBox = `<div class="claim-box other no-print"><div class="grow">🔧 <b>${esc(who)} is pulling this order</b><div class="meta">since ${fmtDateTime(o.claimed_at)} — no need to go get it</div></div><button class="btn secondary small" id="takeover">Take over</button></div>`;
+  } else if (!closed && o.claimed_by) {
+    claimBox = `<div class="claim-box mine">🔧 <b>The warehouse is pulling your order</b> · since ${fmtDateTime(o.claimed_at)}</div>`;
+  }
+
+  const itemRows = items.map((it) => {
+    const rem = remainingOf(it);
+    const del = Number(it.qty_delivered || 0);
+    const delCell = !showDelivered ? '' : `<td class="num">${rem === 0 ? `<span class="done">✓ ${fmtQty(del)}</span>` : del > 0 ? `<span class="partial">${fmtQty(del)}</span><div class="meta">${fmtQty(rem)} to go</div>` : `<span class="meta">0</span>`}</td>`;
+    return `<tr><td><b>${esc(it.item_name)}</b>${it.category ? `<div class="meta">${esc(it.category)}${it.catalog_item_id ? '' : ' · custom'}</div>` : ''}${it.notes ? `<div class="meta">${esc(it.notes)}</div>` : ''}</td><td class="num">${fmtQty(it.quantity)}</td><td>${esc(it.unit || '')}</td>${delCell}</tr>`;
+  }).join('');
+
+  const deliverBox = (!staff || closed || !openItems.length) ? '' : `
+    <div class="card no-print stack" id="deliverBox">
+      <div class="row spread wrap"><h2 style="margin:0">Record a delivery</h2>
+        <div class="row"><button class="btn secondary small" id="fillAll">All</button><button class="btn secondary small" id="fillNone">None</button></div></div>
+      <p class="sub" style="margin:0">Enter what’s going out <b>now</b>. Put 0 for anything that isn’t available — it stays open for the next trip.</p>
+      ${openItems.map((it) => `
+        <div class="deliver-row">
+          <div class="grow"><b>${esc(it.item_name)}</b><div class="meta">${fmtQty(remainingOf(it))} ${esc(it.unit || '')} remaining${Number(it.qty_delivered) > 0 ? ` (of ${fmtQty(it.quantity)})` : ''}</div></div>
+          <input type="number" inputmode="decimal" min="0" step="any" max="${remainingOf(it)}" value="${remainingOf(it)}" data-item="${it.id}" data-max="${remainingOf(it)}" aria-label="Quantity delivered for ${esc(it.item_name)}">
+        </div>`).join('')}
+      <div class="field"><label for="dnote">Note <span class="sub">(backorder, ETA, where it was dropped…)</span></label><textarea id="dnote" placeholder="e.g. Rest of drywall on backorder, ETA Friday"></textarea></div>
+      <button class="btn" id="deliver">Record delivery</button>
+    </div>`;
+
+  const adminBox = !isAdmin() ? '' : `
+    <div class="card no-print stack" id="adminBox">
+      <h2>Update status</h2>
+      <div class="chips" id="st">${STATUSES.map((s) => `<button class="chip ${s === o.status ? 'on' : ''}" data-s="${s}">${s}</button>`).join('')}</div>
+      <div class="field"><label for="an">Office notes <span class="sub">(visible to the requester)</span></label><textarea id="an" placeholder="PO #, supplier, ETA…">${esc(o.admin_notes || '')}</textarea></div>
+      <div class="row"><button class="btn" id="save">Save</button><button class="btn danger" id="del">Delete order</button></div>
+    </div>`;
+
+  const log = (events || []).length ? `
+    <div class="card"><h2>Activity</h2>
+      ${events.map((e) => `<div class="event ${esc(e.kind)}"><div>${esc(e.message)}</div><div class="meta">${esc(e.user?.full_name || e.user?.email || '')}${e.user ? ' · ' : ''}${fmtDateTime(e.created_at)}</div></div>`).join('')}
+    </div>` : '';
+
+  $app.innerHTML = `<div id="orderView">
     <div class="row spread no-print" style="margin-bottom:8px">
-      <a href="${isAdmin() ? '#/admin' : '#/orders'}" class="linkbtn">← Back</a>
-      <div class="row"><button class="btn secondary small" id="print">Print</button><button class="btn secondary small" id="reorder">Reorder</button></div>
+      <a href="${staff ? '#/admin' : '#/orders'}" class="linkbtn">← Back</a>
+      <div class="row"><button class="btn secondary small" id="print">Print</button>${mine || isAdmin() ? `<button class="btn secondary small" id="reorder">Reorder</button>` : ''}</div>
     </div>
+    ${claimBox}
     <div class="card">
       <div class="row spread"><h1 style="margin:0">${orderNo(o.id)}</h1><span class="row">${o.priority === 'Urgent' ? badge('Urgent') : ''}${badge(o.status)}</span></div>
       <dl class="kv" style="margin-top:12px">
@@ -434,21 +504,34 @@ async function viewOrder(id) {
     </div>
     <div class="card">
       <h2>Items</h2>
-      <table class="items"><thead><tr><th>Item</th><th class="num">Qty</th><th>Unit</th></tr></thead><tbody>
-        ${items.map((it) => `<tr><td><b>${esc(it.item_name)}</b>${it.category ? `<div class="meta">${esc(it.category)}${it.catalog_item_id ? '' : ' · custom'}</div>` : ''}${it.notes ? `<div class="meta">${esc(it.notes)}</div>` : ''}</td><td class="num">${fmtQty(it.quantity)}</td><td>${esc(it.unit || '')}</td></tr>`).join('')}
-      </tbody></table>
+      <table class="items"><thead><tr><th>Item</th><th class="num">Ordered</th><th>Unit</th>${showDelivered ? '<th class="num">Delivered</th>' : ''}</tr></thead><tbody>${itemRows}</tbody></table>
     </div>
-    ${isAdmin() ? `
-    <div class="card no-print stack" id="adminBox">
-      <h2>Update status</h2>
-      <div class="chips" id="st">${STATUSES.map((s) => `<button class="chip ${s === o.status ? 'on' : ''}" data-s="${s}">${s}</button>`).join('')}</div>
-      <div class="field"><label for="an">Office notes <span class="sub">(visible to the requester)</span></label><textarea id="an" placeholder="PO #, supplier, ETA…">${esc(o.admin_notes || '')}</textarea></div>
-      <div class="row"><button class="btn" id="save">Save</button><button class="btn danger" id="del">Delete order</button></div>
-    </div>` : ''}
-    ${mine && o.status === 'Pending' && !isAdmin() ? `<button class="btn danger block no-print" id="cancel">Cancel this order</button>` : ''}`;
- 
+    ${deliverBox}
+    ${adminBox}
+    ${log}
+    ${mine && o.status === 'Pending' && !o.claimed_by && !staff ? `<button class="btn danger block no-print" id="cancel">Cancel this order</button>` : ''}
+  </div>`;
+
+  // live updates: if someone else claims / delivers while this is open, refresh
+  if (state.channel) sb.removeChannel(state.channel);
+  state.channel = sb.channel(`order-${id}`)
+    .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'orders', filter: `id=eq.${id}` }, () => {
+      const typing = document.activeElement && document.activeElement.closest && document.activeElement.closest('#deliverBox, #adminBox');
+      if (typing) { toast('This order was just updated by someone else.'); return; }
+      viewOrder(id);
+    })
+    .subscribe();
+
+  const rpc = async (fn, args, okMsg) => {
+    const { data, error: e } = await sb.rpc(fn, args);
+    if (e) { toast(e.message, true); viewOrder(id); return null; }
+    if (okMsg) toast(okMsg);
+    return data ?? true;
+  };
+
   $('#print').onclick = () => window.print();
-  $('#reorder').onclick = () => {
+  const reorder = $('#reorder');
+  if (reorder) reorder.onclick = () => {
     draft = { ...blankDraft(), jobsite_id: o.jobsite_id, delivery_method: o.delivery_method, delivery_notes: o.delivery_notes || '',
       items: items.map((i) => ({ catalog_item_id: i.catalog_item_id, item_name: i.item_name, category: i.category, unit: i.unit, quantity: Number(i.quantity), notes: i.notes || '' })) };
     saveDraft(); toast('Items copied to a new order'); location.hash = '#/new';
@@ -456,41 +539,71 @@ async function viewOrder(id) {
   const cancel = $('#cancel');
   if (cancel) cancel.onclick = async () => {
     if (!confirm('Cancel this order?')) return;
-    const { error } = await sb.from('orders').update({ status: 'Cancelled' }).eq('id', o.id);
-    if (error) return toast(error.message, true);
+    const { data: upd, error: e } = await sb.from('orders').update({ status: 'Cancelled' }).eq('id', o.id).select('id');
+    if (e || !upd?.length) return toast(e?.message || 'The warehouse has already started on this order — call the office to change it.', true);
     toast('Order cancelled'); viewOrder(o.id);
   };
+
+  const claim = $('#claim'), release = $('#release'), takeover = $('#takeover');
+  if (claim) claim.onclick = async () => { claim.disabled = true; if (await rpc('claim_order', { p_order_id: id, p_take_over: false }, 'It’s yours — others can see you’re pulling it')) viewOrder(id); };
+  if (release) release.onclick = async () => { if (await rpc('release_order', { p_order_id: id }, 'Released')) viewOrder(id); };
+  if (takeover) takeover.onclick = async () => {
+    if (!confirm(`${who} is already pulling this order. Take it over?`)) return;
+    if (await rpc('claim_order', { p_order_id: id, p_take_over: true }, 'You took over this order')) viewOrder(id);
+  };
+
+  const box = $('#deliverBox');
+  if (box) {
+    const inputs = $$('input[data-item]', box);
+    $('#fillAll').onclick = () => inputs.forEach((i) => (i.value = i.dataset.max));
+    $('#fillNone').onclick = () => inputs.forEach((i) => (i.value = 0));
+    $('#deliver').onclick = async () => {
+      const lines = inputs.map((i) => ({ order_item_id: Number(i.dataset.item), quantity: Number(i.value || 0) })).filter((l) => l.quantity > 0);
+      if (!lines.length) return toast('Enter a quantity for at least one item', true);
+      const over = inputs.find((i) => Number(i.value) > Number(i.dataset.max));
+      if (over) return toast('One of the quantities is more than what’s left on the order', true);
+      if (o.claimed_by && !claimedByMe && !confirm(`${who} is pulling this order. Record a delivery anyway?`)) return;
+      const btn = $('#deliver'); btn.disabled = true; btn.textContent = 'Saving…';
+      const newStatus = await rpc('record_delivery', { p_order_id: id, p_items: lines, p_note: $('#dnote').value }, null);
+      if (!newStatus) return;
+      notify('delivery', id);
+      toast(newStatus === 'Delivered' ? 'Order complete — marked Delivered' : 'Partial delivery saved — the rest stays open');
+      viewOrder(id);
+    };
+  }
+
   if (isAdmin()) {
     let status = o.status;
     $('#st').onclick = (e) => { const b = e.target.closest('.chip'); if (!b) return; status = b.dataset.s; $$('#st .chip').forEach((x) => x.classList.toggle('on', x === b)); };
     $('#save').onclick = async () => {
       const changed = status !== o.status;
-      const { error } = await sb.from('orders').update({ status, admin_notes: $('#an').value.trim() || null }).eq('id', o.id);
-      if (error) return toast(error.message, true);
+      const { error: e } = await sb.from('orders').update({ status, admin_notes: $('#an').value.trim() || null }).eq('id', o.id);
+      if (e) return toast(e.message, true);
       if (changed) notify('status_change', o.id);
       toast('Saved'); viewOrder(o.id);
     };
     $('#del').onclick = async () => {
       if (!confirm(`Permanently delete ${orderNo(o.id)}?`)) return;
-      const { error } = await sb.from('orders').delete().eq('id', o.id);
-      if (error) return toast(error.message, true);
+      const { error: e } = await sb.from('orders').delete().eq('id', o.id);
+      if (e) return toast(e.message, true);
       toast('Order deleted'); location.hash = '#/admin';
     };
   }
 }
- 
-// ---------------------------------------------------------------- admin
+
+// ---------------------------------------------------------------- admin / warehouse queue
 async function viewAdmin(tab) {
   $app.classList.add('wide');
+  if (!isAdmin()) tab = 'orders'; // warehouse sees the queue only
   const tabs = [['orders', 'Orders'], ['catalog', 'Catalog'], ['jobsites', 'Jobsites'], ['users', 'Users']];
-  $app.innerHTML = `${pushBanner()}<div class="chips admin-tabs">${tabs.map(([k, l]) => `<a class="chip ${k === tab ? 'on' : ''}" href="#/admin/${k}">${l}</a>`).join('')}</div><div id="pane"><div class="loading">Loading…</div></div>`;
+  $app.innerHTML = `${pushBanner()}${isAdmin() ? `<div class="chips admin-tabs">${tabs.map(([k, l]) => `<a class="chip ${k === tab ? 'on' : ''}" href="#/admin/${k}">${l}</a>`).join('')}</div>` : ''}<div id="pane"><div class="loading">Loading…</div></div>`;
   const pane = $('#pane');
   if (tab === 'catalog') return adminCatalog(pane);
   if (tab === 'jobsites') return adminJobsites(pane);
   if (tab === 'users') return adminUsers(pane);
   return adminOrders(pane);
 }
- 
+
 async function adminOrders(pane) {
   let filter = 'Open', job = '', q = '', data = [];
   const load = async () => {
@@ -501,29 +614,32 @@ async function adminOrders(pane) {
   await load();
   const filtered = () => data.filter((o) => {
     if (filter === 'Open' && !OPEN.includes(o.status)) return false;
-    if (filter !== 'Open' && filter !== 'All' && o.status !== filter) return false;
+    if (filter === 'Not claimed' && (!OPEN.includes(o.status) || o.claimed_by)) return false;
+    if (filter === 'Mine' && (o.claimed_by !== uid() || isClosed(o))) return false;
+    if (STATUSES.includes(filter) && o.status !== filter) return false;
     if (job && String(o.jobsite_id) !== job) return false;
     if (q) {
-      const hay = [orderNo(o.id), o.requester?.full_name, o.requester?.email, jobLabel(o.jobsite), ...(o.order_items || []).map((i) => i.item_name)].join(' ').toLowerCase();
+      const hay = [orderNo(o.id), o.requester?.full_name, o.requester?.email, claimerName(o), jobLabel(o.jobsite), ...(o.order_items || []).map((i) => i.item_name)].join(' ').toLowerCase();
       if (!hay.includes(q)) return false;
     }
     return true;
   });
   const draw = () => {
-    const c = (s) => data.filter((o) => o.status === s).length;
+    const open = data.filter((o) => OPEN.includes(o.status));
     $('#stats', pane).innerHTML = `
-      <div class="stat"><b>${c('Pending')}</b><span>Pending</span></div>
-      <div class="stat"><b>${c('Approved')}</b><span>Approved</span></div>
-      <div class="stat"><b>${c('Ordered')}</b><span>Ordered</span></div>
-      <div class="stat"><b style="color:var(--bad)">${data.filter((o) => o.priority === 'Urgent' && OPEN.includes(o.status)).length}</b><span>Urgent &amp; open</span></div>`;
+      <div class="stat"><b>${open.filter((o) => !o.claimed_by).length}</b><span>Not claimed</span></div>
+      <div class="stat"><b>${open.filter((o) => o.claimed_by).length}</b><span>Being pulled</span></div>
+      <div class="stat"><b>${data.filter((o) => o.status === 'Partially Delivered').length}</b><span>Partially delivered</span></div>
+      <div class="stat"><b style="color:var(--bad)">${open.filter((o) => o.priority === 'Urgent').length}</b><span>Urgent &amp; open</span></div>`;
     const list = filtered();
     $('#list', pane).innerHTML = list.length ? list.map((o) => orderCard(o, true)).join('') : `<div class="empty">No orders match.</div>`;
   };
   const jobs = [...new Map(data.filter((o) => o.jobsite).map((o) => [o.jobsite_id, o.jobsite])).values()];
+  const chips = ['Open', 'Not claimed', 'Mine', ...STATUSES, 'All'];
   pane.innerHTML = `
-    <div class="row spread wrap"><h1 style="margin:0">Orders</h1><button class="btn secondary small" id="csv">Export CSV</button></div>
+    <div class="row spread wrap"><h1 style="margin:0">${isAdmin() ? 'Orders' : 'Warehouse queue'}</h1><button class="btn secondary small" id="csv">Export CSV</button></div>
     <div class="stats" id="stats" style="margin-top:12px"></div>
-    <div class="chips" id="f" style="margin-bottom:10px">${['Open', ...STATUSES, 'All'].map((f) => `<button class="chip ${f === filter ? 'on' : ''}" data-f="${f}">${f}</button>`).join('')}</div>
+    <div class="chips" id="f" style="margin-bottom:10px">${chips.map((f) => `<button class="chip ${f === filter ? 'on' : ''}" data-f="${f}">${f}</button>`).join('')}</div>
     <div class="grid2" style="margin-bottom:12px">
       <select id="job"><option value="">All jobsites</option>${jobs.map((j) => `<option value="${j.id}">${esc(jobLabel(j))}</option>`).join('')}</select>
       <input id="q" type="search" placeholder="Search order #, name, item…">
@@ -534,8 +650,8 @@ async function adminOrders(pane) {
   $('#q', pane).oninput = (e) => { q = e.target.value.trim().toLowerCase(); draw(); };
   $('#csv', pane).onclick = () => exportCsv(filtered());
   draw();
- 
-  // live updates while the dashboard is open
+
+  // live updates while the queue is open (claims show up for everyone right away)
   state.channel = sb.channel('orders-dash')
     .on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, async (payload) => {
       await new Promise((r) => setTimeout(r, 800)); // let order items finish saving
@@ -544,13 +660,14 @@ async function adminOrders(pane) {
     })
     .subscribe();
 }
- 
+
 function exportCsv(orders) {
-  const head = ['Order #', 'Submitted', 'Status', 'Priority', 'Job #', 'Jobsite', 'Requested by', 'Needed by', 'Delivery', 'Delivery notes', 'Item', 'Type', 'Qty', 'Unit', 'Item notes', 'Office notes'];
+  const head = ['Order #', 'Submitted', 'Status', 'Priority', 'Job #', 'Jobsite', 'Requested by', 'Needed by', 'Delivery', 'Delivery notes', 'Being pulled by', 'Item', 'Type', 'Qty ordered', 'Qty delivered', 'Qty remaining', 'Unit', 'Item notes', 'Office notes'];
   const rows = [head];
   for (const o of orders) for (const i of o.order_items || []) {
     rows.push([orderNo(o.id), new Date(o.created_at).toLocaleString(), o.status, o.priority, o.jobsite?.job_number || '', o.jobsite?.name || '',
-      o.requester?.full_name || o.requester?.email || '', o.needed_by || '', o.delivery_method, o.delivery_notes || '', i.item_name, i.category || '', i.quantity, i.unit || '', i.notes || '', o.admin_notes || '']);
+      o.requester?.full_name || o.requester?.email || '', o.needed_by || '', o.delivery_method, o.delivery_notes || '', isClosed(o) ? '' : claimerName(o),
+      i.item_name, i.category || '', i.quantity, i.qty_delivered || 0, remainingOf(i), i.unit || '', i.notes || '', o.admin_notes || '']);
   }
   const csv = rows.map((r) => r.map((v) => `"${String(v ?? '').replace(/"/g, '""')}"`).join(',')).join('\r\n');
   const a = document.createElement('a');
@@ -559,7 +676,7 @@ function exportCsv(orders) {
   a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 2000);
 }
- 
+
 // Generic add / edit / hide list for catalog + jobsites
 async function adminList(pane, cfg) {
   const { table, title, fields, order, display, help } = cfg;
@@ -570,7 +687,7 @@ async function adminList(pane, cfg) {
     : `<input type="text" data-k="${f.key}" value="${esc(val ?? f.default ?? '')}" placeholder="${esc(f.label)}">`;
   const formRow = (rec = {}) => `<div class="grid2" style="grid-template-columns:repeat(auto-fit,minmax(150px,1fr))">${fields.map((f) => `<div><label>${esc(f.label)}</label>${input(f, rec[f.key])}</div>`).join('')}</div>`;
   const read = (root) => Object.fromEntries($$('[data-k]', root).map((el) => [el.dataset.k, el.value.trim() || null]));
- 
+
   pane.innerHTML = `
     <h1>${esc(title)}</h1>
     <div class="card"><h2>Add new</h2><div id="add">${formRow()}</div><button class="btn" id="addBtn" style="margin-top:12px">Add</button>
@@ -580,7 +697,7 @@ async function adminList(pane, cfg) {
         <div class="grow view">${display(r)}</div>
         <button class="btn secondary small" data-act="edit">Edit</button>
         <button class="btn secondary small" data-act="toggle">${r.active ? 'Hide' : 'Show'}</button></div>`).join('')}</div>`;
- 
+
   $('#addBtn', pane).onclick = async () => {
     const rec = read($('#add', pane));
     if (fields.some((f) => f.required && !rec[f.key])) return toast(`${fields.find((f) => f.required).label} is required`, true);
@@ -608,7 +725,7 @@ async function adminList(pane, cfg) {
     }
   };
 }
- 
+
 const adminCatalog = (pane) => adminList(pane, {
   table: 'catalog_items', title: 'Materials & equipment catalog', order: ['category', 'name'],
   fields: [
@@ -620,7 +737,7 @@ const adminCatalog = (pane) => adminList(pane, {
   display: (r) => `<b>${esc(r.name)}</b><div class="meta">${esc(r.category)} · per ${esc(r.unit)}${r.description ? ' · ' + esc(r.description) : ''}${r.active ? '' : ' · hidden'}</div>`,
   help: '“Hide” removes an item from the order screen without affecting past orders.',
 });
- 
+
 const adminJobsites = (pane) => adminList(pane, {
   table: 'jobsites', title: 'Jobsites', order: ['job_number', 'name'],
   fields: [
@@ -631,7 +748,7 @@ const adminJobsites = (pane) => adminList(pane, {
   display: (r) => `<b>${esc(jobLabel(r))}</b><div class="meta">${esc(r.address || 'No address')}${r.active ? '' : ' · hidden (closed job)'}</div>`,
   help: 'Hide a jobsite when the job closes so it no longer appears for field crews.',
 });
- 
+
 async function adminUsers(pane) {
   const { data, error } = await sb.from('profiles').select('*').order('full_name');
   if (error) throw error;
@@ -643,7 +760,7 @@ async function adminUsers(pane) {
       <div class="list-row wrap" data-id="${p.id}">
         <div class="grow" style="min-width:200px"><input type="text" data-k="full_name" value="${esc(p.full_name || '')}" placeholder="Full name"><div class="meta" style="margin-top:4px">${esc(p.email || '')}</div></div>
         <input type="tel" data-k="phone" value="${esc(p.phone || '')}" placeholder="Phone" style="max-width:160px">
-        <select data-k="role" style="max-width:130px"><option value="field" ${p.role === 'field' ? 'selected' : ''}>Field</option><option value="admin" ${p.role === 'admin' ? 'selected' : ''}>Admin</option></select>
+        <select data-k="role" style="max-width:130px"><option value="field" ${p.role === 'field' ? 'selected' : ''}>Field</option><option value="warehouse" ${p.role === 'warehouse' ? 'selected' : ''}>Warehouse</option><option value="admin" ${p.role === 'admin' ? 'selected' : ''}>Admin</option></select>
       </div>`).join('')}</div>`;
   $$('[data-k]', pane).forEach((el) => {
     el.onchange = async () => {
@@ -655,7 +772,7 @@ async function adminUsers(pane) {
     };
   });
 }
- 
+
 // ---------------------------------------------------------------- settings
 async function viewSettings() {
   const p = state.profile;
@@ -670,16 +787,16 @@ async function viewSettings() {
   } else if (sub && Notification.permission === 'granted') {
     pushHtml = `<p>✅ Notifications are <b>on</b> for this device.</p><div class="row"><button class="btn secondary" id="test">Send test</button><button class="btn secondary" id="pushOff">Turn off</button></div><div id="testResult" class="sub" style="margin-top:10px"></div>`;
   } else {
-    pushHtml = `<p>${isAdmin() ? 'Get notified when a new order is submitted.' : 'Get notified when your order is approved, ordered or delivered.'}</p><button class="btn" id="pushOn">Turn on notifications</button>`;
+    pushHtml = `<p>${isStaff() ? 'Get notified when a new order is submitted.' : 'Get notified when your order is approved, ordered or delivered.'}</p><button class="btn" id="pushOn">Turn on notifications</button>`;
   }
- 
+
   $app.innerHTML = `
     <h1>Account</h1>
     <div class="card stack">
       <h2>Your info</h2>
       <div class="field"><label>Name</label><input id="nm" type="text" value="${esc(p.full_name || '')}"></div>
       <div class="field"><label>Phone</label><input id="ph" type="tel" value="${esc(p.phone || '')}"></div>
-      <div class="sub">${esc(p.email || '')} · ${p.role === 'admin' ? 'Admin' : 'Field'}</div>
+      <div class="sub">${esc(p.email || '')} · ${{ admin: 'Admin', warehouse: 'Warehouse', field: 'Field' }[p.role] || p.role}</div>
       <button class="btn secondary" id="saveP">Save</button>
     </div>
     <div class="card"><h2>Notifications</h2>${pushHtml}</div>
@@ -693,7 +810,7 @@ async function viewSettings() {
       <button class="btn secondary" id="savePw">Update password</button>
     </div>
     <button class="btn danger block" id="out">Sign out</button>`;
- 
+
   $('#saveP').onclick = async () => {
     const { error } = await sb.from('profiles').update({ full_name: $('#nm').value.trim() || null, phone: $('#ph').value.trim() || null }).eq('id', uid());
     if (error) return toast(error.message, true);
@@ -729,7 +846,7 @@ async function viewSettings() {
   };
   $('#out').onclick = async () => { await disablePush().catch(() => {}); await sb.auth.signOut(); };
 }
- 
+
 // ---------------------------------------------------------------- start
 sb.auth.onAuthStateChange((event, session) => {
   // run outside the auth callback (supabase-js recommendation)
@@ -740,6 +857,9 @@ sb.auth.onAuthStateChange((event, session) => {
     if (event === 'INITIAL_SESSION') { if (session) await loadBasics(); return route(); }
     if (event === 'SIGNED_OUT') { state.profile = null; location.hash = ''; return route(); }
     if (session && session.user.id !== prev) { await loadBasics(); return route(); }
+    if (event === 'PASSWORD_RECOVERY') route();
+  }, 0);
+});
     if (event === 'PASSWORD_RECOVERY') route();
   }, 0);
 });
