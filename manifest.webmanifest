@@ -2,7 +2,7 @@
   "name": "M-A Building Field Orders",
   "short_name": "Field Orders",
   "description": "Order materials and equipment for jobsites",
-  "start_url": "./#/new",
+  "start_url": "./",
   "scope": "./",
   "display": "standalone",
   "background_color": "#f3f4f6",

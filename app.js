@@ -65,6 +65,9 @@ const sb = createClient(CFG.SUPABASE_URL, CFG.SUPABASE_ANON_KEY);
 const state = { session: null, profile: null, jobsites: [], catalog: [], recovery: false, channel: null };
 const isAdmin = () => state.profile?.role === 'admin';
 const isStaff = () => ['admin', 'warehouse'].includes(state.profile?.role);
+const isWarehouse = () => state.profile?.role === 'warehouse';
+// the screen the app opens on: the queue for warehouse users, a new order for everyone else
+const homeHash = () => (isWarehouse() ? '#/admin' : '#/new');
 const uid = () => state.session?.user?.id;
 
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
@@ -159,7 +162,8 @@ const ICONS = {
 function renderTabbar(active) {
   if (!state.session || state.recovery) { $tabbar.classList.add('hidden'); return; }
   const tabs = [['new', '#/new', 'New Order'], ['orders', '#/orders', 'My Orders']];
-  if (isStaff()) tabs.push(['admin', '#/admin', isAdmin() ? 'Admin' : 'Queue']);
+  if (isWarehouse()) tabs.unshift(['admin', '#/admin', 'Queue']);   // warehouse: Queue comes first
+  else if (isAdmin()) tabs.push(['admin', '#/admin', 'Admin']);
   tabs.push(['settings', '#/settings', 'Account']);
   $tabbar.innerHTML = tabs.map(([k, href, label]) => `<a href="${href}" class="${active === k ? 'on' : ''}">${ICONS[k]}<span>${label}</span></a>`).join('');
   $tabbar.classList.remove('hidden');
@@ -999,9 +1003,18 @@ sb.auth.onAuthStateChange((event, session) => {
     const prev = state.session?.user?.id;
     state.session = session;
     if (event === 'PASSWORD_RECOVERY') state.recovery = true;
-    if (event === 'INITIAL_SESSION') { if (session) await loadBasics(); return route(); }
+    if (event === 'INITIAL_SESSION') {
+      if (session) await loadBasics();
+      // opening the app (or the home-screen icon) lands warehouse users on their queue
+      if (session && ['', '#', '#/', '#/new'].includes(location.hash) && homeHash() !== '#/new') { history.replaceState(null, '', homeHash()); }
+      return route();
+    }
     if (event === 'SIGNED_OUT') { state.profile = null; location.hash = ''; return route(); }
-    if (session && session.user.id !== prev) { await loadBasics(); return route(); }
+    if (session && session.user.id !== prev) {
+      await loadBasics();
+      if (['', '#', '#/', '#/new'].includes(location.hash) && homeHash() !== '#/new') history.replaceState(null, '', homeHash());
+      return route();
+    }
     if (event === 'PASSWORD_RECOVERY') route();
   }, 0);
 });
